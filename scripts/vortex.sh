@@ -68,7 +68,7 @@ install_vortex_agent() {
       return
     fi
   fi
-  local url="https://github.com/jarvis2f/vortex-agent/releases/download/${vortex_agent_version}_linux_$arch.tar.gz"
+  local url="https://github.com/jarvis2f/vortex-agent/releases/download/v${vortex_agent_version}/vortex-agent_${vortex_agent_version}_linux_$arch.tar.gz"
   download "$url" vortex
   chmod -R 777 /usr/bin/vortex
 

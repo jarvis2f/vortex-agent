@@ -17,8 +17,8 @@ FROM alpine:3.18 as runner
 RUN apk add --no-cache bash python3
 WORKDIR /app
 
-COPY --from=builder /app/vortex ./files
-COPY ./scripts/*.sh ./files
-COPY ./scripts/server.py .
+COPY --from=builder /app/vortex ./files/
+COPY --chmod=0755 ./scripts/*.sh ./files/
+COPY --chmod=0755 ./scripts/server.py .
 
 CMD ["./server.py"]
