@@ -43,8 +43,26 @@ uninstall_gost() {
   echo ">>> gost service uninstalled successfully"
 }
 
+uninstall_realm() {
+  if [ -f "/etc/systemd/system/realm.service" ]; then
+    systemctl stop realm
+    systemctl disable realm
+    rm /etc/systemd/system/realm.service
+  fi
+
+  if [ -f "/usr/bin/realm" ]; then
+    rm /usr/bin/realm
+  fi
+
+  if [ -d "/etc/realm" ]; then
+    rm -rf /etc/realm
+  fi
+
+  echo ">>> realm service uninstalled successfully"
+}
+
 check_root
 uninstall_vortex_agent
 uninstall_gost
-
+uninstall_realm
 echo ">>> Uninstall completed"

@@ -1,7 +1,8 @@
 #!/bin/bash
 
 vortex_agent_version="0.1.0"
-gost_version="3.0.0-nightly.20240201"
+gost_version="3.0.0"
+realm_version="2.7.0"
 
 vortex_agent_id=""
 vortex_agent_key=""
@@ -88,7 +89,7 @@ Restart=always
 RestartSec=5
 DynamicUser=true
 ExecStart=/usr/bin/vortex agent start -C /etc/vortex/config.json
-ReadWritePaths=/etc/vortex /etc/gost
+ReadWritePaths=/etc/vortex /etc/gost /etc/realm/ /etc/realm/configs
 [Install]
 WantedBy=multi-user.target
 EOF
@@ -173,6 +174,61 @@ EOF
   echo ">>> gost service installed successfully"
 }
 
+install_realm(){
+  if [ -f "/usr/bin/realm" ]; then
+    local installed_version
+    installed_version=$(realm -v | awk '{print $2}')
+    echo ">>> realm Installed version: $installed_version"
+    echo ">>> realm Required version: $realm_version"
+    if [ "$installed_version" = "v$realm_version" ]; then
+      echo ">>> realm already installed"
+      return
+    fi
+  fi
+  local url="https://github.com/zhboner/realm/releases/download/v$realm_version/realm-x86_64-unknown-linux-gnu.tar.gz"
+  download "$url" realm
+  chmod -R 777 /usr/bin/realm
+
+  if [ ! -d "/etc/realm/configs" ]; then
+    mkdir /etc/realm/configs
+  fi
+
+  if [ ! -f "/etc/realm/configs/config.json" ]; then
+    cat >/etc/realm/configs/config.json <<EOF
+{
+    "log": {"level": "warn"}
+}
+EOF
+  fi
+
+  if [ ! -d "/etc/systemd/system" ]; then
+    mkdir /etc/systemd/system
+  fi
+
+  if [ ! -f "/etc/systemd/system/realm.service" ]; then
+    cat >/etc/systemd/system/realm.service <<EOF
+[Unit]
+Description=realm
+After=network-online.target
+Wants=network-online.target systemd-networkd-wait-online.service
+
+[Service]
+Type=simple
+User=root
+Restart=always
+RestartSec=5
+DynamicUser=true
+ExecStart=/usr/bin/realm -c /etc/realm/configs/
+ReadWritePaths=/etc/realm/configs /etc/realm/
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  fi
+
+  echo ">>> realm service installed successfully"
+}
+
 get_arch
 check_root
 download_script "https://raw.githubusercontent.com/jarvis2f/vortex-agent/main/scripts/iptables.sh"
@@ -200,6 +256,7 @@ vortex_agent_key="${params[1]}"
 vortex_server="${params[2]}"
 
 install_gost
+install_realm
 install_vortex_agent
 update_vortex_config
 service vortex start
