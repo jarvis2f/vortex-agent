@@ -1,18 +1,23 @@
 package agent
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"go.uber.org/zap"
 	"math/rand"
 	"os"
 	"os/exec"
 	"strconv"
 	"strings"
+
+	"path/filepath"
+
+	"go.uber.org/zap"
 )
 
 var gostConfigPath = "/etc/gost/config.json"
+var realmConfigDir = "/etc/realm/configs"
 
 type ForwardTask struct {
 	Task
@@ -35,10 +40,12 @@ var ForwardTaskHandlers = map[string]map[string]ForwardTaskHandleFunc{
 	"add": {
 		"IPTABLES": handleForwardTaskAddIptables,
 		"GOST":     handleForwardTaskAddGOST,
+		"REALM":    handleForwardTaskAddREALM,
 	},
 	"delete": {
 		"IPTABLES": handleForwardTaskDeleteIptables,
 		"GOST":     handleForwardTaskDeleteGOST,
+		"REALM":    handleForwardTaskDeleteREALM,
 	},
 }
 
@@ -184,6 +191,117 @@ func writeGOSTConfig(config []byte) error {
 }
 
 //<-----------------------------GOST end---------------------------------->
+
+// <-----------------------------REALM---------------------------------->
+
+func handleForwardTaskAddREALM(forwardTask ForwardTask) (interface{}, error) {
+	agentPort := forwardTask.AgentPort
+	SelectAvailablePort(&agentPort)
+
+
+    optionsBytes := []byte(forwardTask.Options)
+	
+	// Check if forwardTask.AgentPort is not set (assuming 0 means not set)
+	if forwardTask.AgentPort == 0 {
+		// Parse options JSON
+		var optionsJson map[string]interface{}
+		if err := json.Unmarshal(optionsBytes, &optionsJson); err != nil {
+			return nil, fmt.Errorf("unmarshal options failed: %w", err)
+		}
+		
+		// Check if endpoints array exists and has at least one element
+		endpoints, ok := optionsJson["endpoints"].([]interface{})
+		if ok && len(endpoints) > 0 {
+			// Get the first endpoint
+			endpoint, ok := endpoints[0].(map[string]interface{})
+			if ok {
+				// Update the listen field
+				endpoint["listen"] = fmt.Sprintf("0.0.0.0:%d", agentPort)
+				// Update the endpoints array
+				endpoints[0] = endpoint
+				optionsJson["endpoints"] = endpoints
+				
+				// Marshal the updated options back to JSON
+				newOptionsBytes, err := json.Marshal(optionsJson)
+				if err != nil {
+					return nil, fmt.Errorf("marshal updated options failed: %w", err)
+				}
+				optionsBytes = newOptionsBytes
+			}
+		}
+	}
+	
+	LogR.Sugar().Debugf("使用 Realm 进行端口转发, %d -> %s:%d", agentPort, forwardTask.Target, forwardTask.TargetPort)
+	if err := writeREALMConfig([]byte(optionsBytes), forwardTask.ForwardId); err != nil {
+		return nil, err
+	}
+	if err := restartREALM(); err != nil {
+		return nil, err
+	}
+
+	LogR.Sugar().Debugf("转发成功. %d -> %s:%d", agentPort, forwardTask.Target, forwardTask.TargetPort)
+	result := ForwardTaskResult{
+		AgentPort: agentPort,
+	}
+	resultJson, _ := json.Marshal(result)
+	GlobalAgent.ReportTaskResult(forwardTask.Id, true, base64.StdEncoding.EncodeToString(resultJson))
+	return forwardTask, nil
+}
+
+func handleForwardTaskDeleteREALM(forwardTask ForwardTask) (interface{}, error) {
+	configFilePath := fmt.Sprintf("%s/%s.json", realmConfigDir, forwardTask.ForwardId)
+	if err := os.Remove(configFilePath); err != nil {
+		return nil, fmt.Errorf("删除REALM配置文件失败: %w", err)
+	}
+
+	if err := restartREALM(); err != nil {
+		return nil, err
+	}
+	
+	LogR.Sugar().Debugf("删除转发成功. %d -> %s:%d", forwardTask.AgentPort, forwardTask.Target, forwardTask.TargetPort)
+	result := ForwardTaskResult{
+		AgentPort: forwardTask.AgentPort,
+	}
+	resultJson, _ := json.Marshal(result)
+	GlobalAgent.ReportTaskResult(forwardTask.Id, true, base64.StdEncoding.EncodeToString(resultJson))
+	return forwardTask, nil
+}
+
+func restartREALM() error {
+	out := ShellExecutor(Shell{
+		Command:  "systemctl",
+		Args:     []string{"restart", "realm"},
+		Internal: false,
+	})
+	if out == nil {
+		return fmt.Errorf("重启Realm失败, 查看日志了解详细信息")
+	}
+	return nil
+}
+
+func writeREALMConfig(config []byte, forwardId string) error {
+    // 确保目录存在
+    if _, err := os.Stat(realmConfigDir); os.IsNotExist(err) {
+        if err := os.MkdirAll(realmConfigDir, 0755); err != nil {
+            return fmt.Errorf("创建REALM配置文件目录失败: %w", err)
+        }
+    }
+
+    // 把 rawJSON 缩进格式化
+    var configBuf bytes.Buffer
+    if err := json.Indent(&configBuf, config, "", "  "); err != nil {
+        return fmt.Errorf("JSON 格式化失败: %w", err)
+    }
+
+    // 写文件
+    configFilePath := filepath.Join(realmConfigDir, forwardId+".json")
+    if err := os.WriteFile(configFilePath, configBuf.Bytes(), 0644); err != nil {
+        return fmt.Errorf("写入REALM配置文件失败: %w", err)
+    }
+    return nil
+}
+
+//<-----------------------------REALM end---------------------------------->
 
 func SelectAvailablePort(port *int) {
 	if *port == 0 {
