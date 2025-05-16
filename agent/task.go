@@ -1,6 +1,9 @@
 package agent
 
 import (
+	"context"
+	"net"
+	"os/exec"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -112,6 +115,46 @@ type PingTask struct {
 	Host    string
 	Count   int
 	TimeOut int64
+	AgentPort int
+	ForwardMethod string
+}
+
+func checkServiceStatusByPort(port string, expectedService string) (bool, string) {
+    cmd := exec.Command("ss", "-tunlp", "|", "grep", ":"+port)
+    output, err := cmd.CombinedOutput()
+    
+    if err != nil {
+        cmd = exec.Command("bash", "-c", "ss -tunlp | grep :"+port)
+        output, err = cmd.CombinedOutput()
+        
+        if err != nil {
+            return false, fmt.Sprintf("检查端口 %s 失败: %v", port, err)
+        }
+    }
+    
+    
+    outputStr := string(output)
+    if outputStr == "" {
+        return false, fmt.Sprintf("端口 %s 未被任何服务使用", port)
+    }
+    
+    isActive := strings.Contains(strings.ToLower(outputStr), strings.ToLower(expectedService))
+    
+    return isActive, outputStr
+}
+
+func tcpPing(ctx context.Context, host, port string, timeoutMs int) (float64, error) {
+    dialCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutMs)*time.Millisecond)
+    defer cancel()
+
+    start := time.Now()
+    conn, err := (&net.Dialer{}).DialContext(dialCtx, "tcp", net.JoinHostPort(host, port))
+    elapsed := float64(time.Since(start).Microseconds()) / 1000.0
+    if err != nil {
+        return elapsed, err
+    }
+    conn.Close()
+    return elapsed, nil
 }
 
 func handlePingTask(task Task) (interface{}, error) {
@@ -120,19 +163,80 @@ func handlePingTask(task Task) (interface{}, error) {
 	if err != nil {
 		return nil, err
 	}
-	pinger, err := probing.NewPinger(pingTask.Host)
+
+	// 拆 host:port（默认 80）
+    host, port, err := net.SplitHostPort(pingTask.Host)
+	
+	if err != nil {
+        host = pingTask.Host
+        port = "80"
+    }
+
+	pinger, err := probing.NewPinger(host)
 	if err != nil {
 		return nil, err
 	}
+
 	pinger.Count = 1
+
 	if pingTask.Count > 0 {
 		pinger.Count = pingTask.Count
 	}
+
 	if pingTask.TimeOut > 0 {
 		pinger.Timeout = time.Duration(pingTask.TimeOut) * time.Second
 	}
+
+	// 服务状态
+	type serviceStatus struct {
+		IsActive bool   `json:"is_active"`
+		Details  string `json:"details"`
+	}
+    // 最终结果
+    type combinedResult struct {
+        ICMP probing.Statistics `json:"icmp"`
+        TCP  []float64          `json:"tcp_rtts_ms"`
+		ServiceStatus serviceStatus `json:"service_status"`
+    }
+
 	pinger.OnFinish = func(stats *probing.Statistics) {
-		b, _ := json.Marshal(stats)
+
+		count := pingTask.Count
+        if count <= 0 {
+            count = 1
+        }
+
+        timeoutMs := int(pingTask.TimeOut * 1000) // 转换为毫秒
+
+		// 收集 TCP RTT
+        var rtts []float64
+        for i := 0; i < count; i++ {
+            if rtt, err := tcpPing(context.Background(), host, port, timeoutMs); err == nil {
+                rtts = append(rtts, rtt)
+            }
+        }
+
+		// 检查服务状态
+		var svcStatus serviceStatus
+		if pingTask.ForwardMethod == "REALM" || pingTask.ForwardMethod == "GOST" {
+			expectedService := strings.ToLower(pingTask.ForwardMethod)
+			portStr := fmt.Sprintf("%d", pingTask.AgentPort)
+			isActive, details := checkServiceStatusByPort(portStr, expectedService)
+			
+			svcStatus = serviceStatus{
+				IsActive: isActive,
+				Details:  details,
+			}
+		}
+
+        combined := combinedResult{
+            ICMP: *stats,
+            TCP:  rtts,
+			ServiceStatus: svcStatus,
+        }
+
+		b, _ := json.Marshal(&combined)
+
 		GlobalAgent.ReportTaskResult(task.Id, true, base64.StdEncoding.EncodeToString(b))
 	}
 	if err := pinger.Run(); err != nil {
