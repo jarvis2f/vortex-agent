@@ -190,7 +190,7 @@ install_realm(){
   chmod -R 777 /usr/bin/realm
 
   if [ ! -d "/etc/realm/configs" ]; then
-    mkdir /etc/realm/configs
+    mkdir -p /etc/realm/configs
   fi
 
   if [ ! -f "/etc/realm/configs/config.json" ]; then
